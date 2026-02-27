@@ -1,0 +1,17 @@
+# Streamlit 数据分析看板 - 依赖列表
+# 安装: pip install -r requirements.txt
+
+# Web 应用框架
+streamlit>=1.28.0,<2.0
+
+# 数据处理
+pandas>=2.0.0
+
+# Excel 读取 (pd.read_excel(engine='openpyxl'))
+openpyxl>=3.1.0
+
+# 图表可视化
+plotly>=5.18.0
+
+# 趋势线 (trendline="ols" / "lowess") 所需
+statsmodels>=0.14.0
