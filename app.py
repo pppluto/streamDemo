@@ -1,4 +1,7 @@
+import io
+import zipfile
 import pandas as pd
+import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -26,7 +29,7 @@ col_map = {
     # 核心转化率
     'Unique redirects rate': '跳转转化率 (CVR)',
     'Unique interactions rate': '互动率 (IVR)',
-    'CTA click rate': '点击率 (CTR)',
+    'CTA click rate': 'CTA点击率 (CTR)',
     'Redirect rate': '总跳转率',
         
     # 页面加载与生命周期
@@ -61,9 +64,16 @@ col_map = {
     'Runtime error': '运行错误数',
     'Black view error rate': '黑屏率',
     'Rendering error rate': '渲染错误率',
-    'Runtime error rate': '运行报错率'
+    'Runtime error rate': '运行报错率',
+
+    # tag 表 Sheet2 标签列（分类标签，非连续型指标）
+    '点消': '点消',
+    '拖消': '拖消',
+    '目标物品': '目标物品',
 }
-    # 一个辅助函数：如果有翻译就用翻译，没有就显示原文
+# 标签列：用于相关性分析时可选排除（与连续型指标含义不同）
+TAG_COLS = ["点消", "拖消", "目标物品"]
+
 def get_label(col_name):
     return col_map.get(col_name, col_name)
 
@@ -73,54 +83,174 @@ st.title("📊 广告数据看板 (本地读取)")
 #侧边栏
 with st.sidebar:
     st.header("📍 页面导航")
-    page = st.radio("选择功能模块", ["📊 数据看板", "🛠️ 自定义探索"], index=0)
+    page = st.radio("选择功能模块", ["📊 数据看板", "🛠️ 自定义探索", "📈 相关性分析", "📉 预测分析"], index=0)
     st.markdown("---")
 
 
     st.header("⚙️ 参数设置")
-    file_name = st.text_input("Excel 文件名", value="sksx.xlsx")
+    # 优先支持网页上传：Excel 或 含 Excel 的 ZIP 包
+    uploaded_file = st.file_uploader(
+        "上传 Excel 或 ZIP 包（可选）",
+        type=["xlsx", "xls", "zip"],
+        help="支持 .xlsx / .xls / .zip。若 Excel 在本地打开需输入密码，请先「另存为」未加密的 .xlsx 再上传；ZIP 加密时可在下方填写密码。",
+    )
+
+    if uploaded_file is None:
+        data_table = st.selectbox("数据表", ["sksx.xlsx", "tag.xlsx"], index=0, help="选择要分析的数据表")
+        file_name = data_table
+    else:
+        file_name = uploaded_file.name
+
     min_imp = st.number_input("展示量过滤最小阈值 (Impressions > ?)", value=1000, step=100)
     max_imp = st.number_input("展示量过滤最大阈值 (Impressions < ?)", value=-1, step=100)
     if st.button("🔄 刷新数据"):
         st.rerun()
 
+def _excel_engine(file_name):
+    """按扩展名选择 Excel 引擎：.xls 用 xlrd，.xlsx 用 openpyxl，避免 'file is not a zip file'。"""
+    if file_name and str(file_name).lower().endswith(".xls") and not str(file_name).lower().endswith(".xlsx"):
+        return "xlrd"
+    return "openpyxl"
 
 try:
-    df = pd.read_excel(file_name, engine='openpyxl')
-    st.success("✅ 本地文件 'sksx.xlsx' 读取成功！")
-    
+    if uploaded_file is not None:
+        uploaded_file.seek(0)
+        is_zip = file_name.lower().endswith(".zip")
+
+        if is_zip:
+            # ZIP 包：支持加密 ZIP（侧栏可填密码），解压后列出其中的 Excel 文件供选择
+            zip_password = st.sidebar.text_input(
+                "ZIP 密码（若压缩包加密请填写，选填）",
+                type="password",
+                key="zip_pwd",
+                help="仅当 ZIP 压缩时设置了密码时需要填写",
+            )
+            zip_pwd_bytes = zip_password.encode("utf-8") if zip_password else None
+            try:
+                with zipfile.ZipFile(uploaded_file, "r") as z:
+                    excel_in_zip = [n for n in z.namelist() if n.lower().endswith((".xlsx", ".xls")) and not n.startswith("__")]
+            except zipfile.BadZipFile as e:
+                st.error("❌ 无法识别为 ZIP 文件，可能已损坏或不是标准 ZIP 格式。")
+                st.stop()
+            except RuntimeError as e:
+                if "password" in str(e).lower() or "encrypt" in str(e).lower():
+                    st.error("❌ 该 ZIP 可能已加密。请在左侧「ZIP 密码」中填写正确密码后点击「刷新数据」重试。")
+                else:
+                    st.error(f"❌ 读取 ZIP 失败：{e}")
+                st.stop()
+            if not excel_in_zip:
+                st.error("❌ 该 ZIP 中未找到 .xlsx 或 .xls 文件，请检查压缩包内容。")
+                st.stop()
+            if len(excel_in_zip) == 1:
+                excel_choice = excel_in_zip[0]
+            else:
+                excel_choice = st.sidebar.selectbox("选择 ZIP 内的 Excel 文件", excel_in_zip, key="zip_excel")
+            uploaded_file.seek(0)
+            try:
+                with zipfile.ZipFile(uploaded_file, "r") as z:
+                    excel_bytes = z.read(excel_choice, pwd=zip_pwd_bytes)
+            except RuntimeError as e:
+                if "password" in str(e).lower() or "Bad password" in str(e):
+                    st.error("❌ ZIP 密码错误或压缩包已加密。请检查左侧「ZIP 密码」后刷新重试。")
+                else:
+                    st.error(f"❌ 解压 ZIP 内文件失败：{e}")
+                st.stop()
+            excel_io = io.BytesIO(excel_bytes)
+            engine = _excel_engine(excel_choice)
+            try:
+                xl = pd.ExcelFile(excel_io, engine=engine)
+            except Exception as zip_err:
+                if "zip" in str(zip_err).lower() and engine == "openpyxl":
+                    excel_io.seek(0)
+                    xl = pd.ExcelFile(excel_io, engine="xlrd")
+                else:
+                    raise zip_err
+            display_name = f"{file_name} / {excel_choice}"
+        else:
+            # 直接上传的 Excel
+            engine = _excel_engine(uploaded_file.name)
+            try:
+                xl = pd.ExcelFile(uploaded_file, engine=engine)
+            except Exception as zip_err:
+                if "zip" in str(zip_err).lower() and engine == "openpyxl":
+                    uploaded_file.seek(0)
+                    xl = pd.ExcelFile(uploaded_file, engine="xlrd")
+                else:
+                    raise zip_err
+            display_name = file_name
+
+        sheet_names = xl.sheet_names
+        if len(sheet_names) > 1:
+            sheet_choice = st.sidebar.selectbox("选择 Sheet", sheet_names, index=0, key="upload_sheet")
+        else:
+            sheet_choice = sheet_names[0]
+        df = xl.parse(sheet_choice)
+        # 若列数≥5 且用户希望按 tag 表格式解析，可将第 3～5 列视为点消/拖消/目标物品（与本地 tag 表一致）
+        if len(df.columns) >= 5 and st.sidebar.checkbox("按 tag 表格式解析（第3～5列为点消/拖消/目标物品）", value=False, key="tag_parse"):
+            df = df.rename(columns={
+                df.columns[2]: "点消",
+                df.columns[3]: "拖消",
+                df.columns[4]: "目标物品",
+            })
+        st.success(f"✅ 已加载上传文件「{display_name}」Sheet「{sheet_choice}」")
+    else:
+        # 使用本地数据表
+        if file_name == "tag.xlsx":
+            df = pd.read_excel(file_name, sheet_name="Sheet2", engine="openpyxl")
+            if len(df.columns) >= 5:
+                df = df.rename(columns={
+                    df.columns[2]: "点消",
+                    df.columns[3]: "拖消",
+                    df.columns[4]: "目标物品",
+                })
+        else:
+            df = pd.read_excel(file_name, engine="openpyxl")
+        st.success(f"✅ 本地文件「{file_name}」读取成功！")
 except FileNotFoundError:
-    st.error("❌ 找不到文件！请确认 'sksx.xlsx' 在当前目录下。")
+    st.error(f"❌ 找不到文件！请确认「{file_name}」在当前目录下。")
     st.stop()
 except Exception as e:
-    st.error(f"❌ 读取失败！文件被加密")
+    err = str(e).lower()
+    if "zip" in err and "not a zip" in err:
+        st.error("❌ 读取失败：当前文件不是有效的 .xlsx 格式（或可能已加密/损坏）。若为 .xls 已自动用 xlrd 重试；若在 Excel 中打开需输入密码，请先「另存为」未加密的 .xlsx 再上传。")
+    elif "password" in err or "encrypt" in err or "protected" in err:
+        st.error("❌ 该 Excel 可能已加密或受密码保护。请在本地用 Excel 打开后「另存为」一份未加密的 .xlsx，再重新上传。")
+    else:
+        st.error(f"❌ 读取失败：{e}")
     st.stop()
 
-
-st.success("🎉 读取成功！")
-
-#筛选有效数据 默认展示量过滤阈值为1000 可自行修改
-if max_imp > 0 and max_imp > min_imp:
-    df_effective = df[(df['Impressions'] >  min_imp) & (df['Impressions'] <  max_imp) & (df['CTA clicked'] != 0)]
+# 筛选有效数据（若存在 Impressions / CTA clicked 列则按阈值过滤，否则使用全部行）
+if "Impressions" in df.columns and "CTA clicked" in df.columns:
+    if max_imp > 0 and max_imp > min_imp:
+        df_effective = df[(df["Impressions"] > min_imp) & (df["Impressions"] < max_imp) & (df["CTA clicked"] != 0)]
+    else:
+        df_effective = df[(df["Impressions"] > min_imp) & (df["CTA clicked"] != 0)]
 else:
-    df_effective = df[(df['Impressions'] >  min_imp) & (df['CTA clicked'] != 0)]
+    df_effective = df.copy()
+    if "Impressions" not in df.columns or "CTA clicked" not in df.columns:
+        st.info("当前数据缺少 Impressions 或 CTA clicked 列，未做展示量/点击过滤，展示全部行。")
 
 with st.sidebar:
     st.markdown("---") 
     st.header("🔎 素材链接搜索")
     search_keyword = st.text_input("输入素材名 (如果不填默认显示Top20)", "")
-    df_search = df_effective.sort_values(by='Impressions', ascending=False)[['HTML', 'URL']].drop_duplicates()
-    
-    if search_keyword:
-        df_display_links = df_search[df_search['HTML'].str.contains(search_keyword, case=False, na=False)]
+    has_html_url = "HTML" in df_effective.columns and "URL" in df_effective.columns
+    sort_col = "Impressions" if "Impressions" in df_effective.columns else df_effective.columns[0]
+    if has_html_url:
+        df_search = df_effective.sort_values(by=sort_col, ascending=False)[["HTML", "URL"]].drop_duplicates()
+        if search_keyword:
+            df_display_links = df_search[df_search["HTML"].astype(str).str.contains(search_keyword, case=False, na=False)]
+        else:
+            df_display_links = df_search.head(20)
+        max_items = 20
+        if len(df_display_links) > max_items:
+            st.warning(f"结果太多，仅显示前 {max_items} 条...")
+            df_display = df_display_links.head(max_items)
+        else:
+            df_display = df_display_links
     else:
-        df_display_links = df_search.head(20)
-    max_items = 20
-    if len(df_display_links) > max_items:
-        st.warning(f"结果太多，仅显示前 {max_items} 条...")
-        df_display = df_display_links.head(max_items)
-    else:
-        df_display = df_display_links
+        df_display = pd.DataFrame()
+        st.caption("当前数据无 HTML/URL 列，跳过素材链接搜索。")
 
     if not df_display.empty:
         for index, row in df_display.iterrows():
@@ -703,3 +833,139 @@ if page == "🛠️ 自定义探索":
         except Exception as e:
             st.error(f"图表绘制出错: {e}")
             st.caption("常见原因：选中的列全是空值，或者数值列包含了无法计算的字符。")
+
+if page == "📈 相关性分析":
+    st.header("📈 指标相关性分析")
+    st.caption("基于当前筛选后的数据计算 Pearson / Spearman 相关，找出关联较强的指标对。")
+
+    # 数值列，去掉全空与常数列
+    numeric = df_effective.select_dtypes(include=[np.number])
+    numeric = numeric.dropna(axis=1, how="all")
+    numeric = numeric.loc[:, numeric.nunique() > 1]
+
+    # 当前数据中实际存在的标签列
+    tag_cols_present = [c for c in TAG_COLS if c in numeric.columns]
+
+    if numeric.shape[1] < 2:
+        st.warning("数值列不足，无法计算相关性。请放宽筛选条件或检查数据。")
+    else:
+        # 是否排除标签列：点消/拖消/目标物品 是分类标签，与连续型指标含义不同
+        exclude_tags = st.checkbox(
+            "排除标签列（点消/拖消/目标物品），仅分析指标间相关",
+            value=bool(tag_cols_present),
+            help="勾选后，相关性只在不同「指标」之间计算，不包含标签。标签与指标的相关表示「带该标签的素材与某指标高低的关联」，适合单独看分组差异。",
+        )
+        if exclude_tags and tag_cols_present:
+            all_cols = [c for c in numeric.columns.tolist() if c not in tag_cols_present]
+        else:
+            all_cols = numeric.columns.tolist()
+        if len(all_cols) < 2:
+            all_cols = numeric.columns.tolist()
+
+        if tag_cols_present:
+            with st.expander("关于「点消 / 拖消 / 目标物品」标签列"):
+                st.markdown(
+                    "点消、拖消、目标物品是对**素材打的分类标签**，取值为 0/1 或类别，不是连续型指标。\n\n"
+                    "- **纳入相关性**：相关系数表示「带该标签的素材与某指标高低的关联」（类似分组差异），可用来看哪类标签的素材更偏某指标。\n"
+                    "- **排除标签列**：只分析指标与指标之间的相关（如 CTR 与 CVR、展示量与花费等），结论更聚焦于指标间的线性/秩相关。"
+                )
+
+        selected_cols = st.multiselect(
+            "选择要参与相关性分析的指标（不选则显示全部）",
+            options=all_cols,
+            default=all_cols,
+            format_func=lambda x: get_label(x),
+            help="至少选 2 个指标，热力图与下方表格仅展示所选指标之间的相关。",
+        )
+        if len(selected_cols) < 2:
+            st.warning("请至少选择 2 个指标，或保持默认「全部」显示。")
+            selected_cols = all_cols
+
+        corr_pearson = numeric.corr(method="pearson")
+        corr_spearman = numeric.corr(method="spearman")
+        # 按所选指标子集截取相关矩阵
+        corr_pearson_sub = corr_pearson.loc[selected_cols, selected_cols]
+        corr_spearman_sub = corr_spearman.loc[selected_cols, selected_cols]
+        selected_set = set(selected_cols)
+
+        # 相关矩阵热力图（仅所选指标）
+        corr_method = st.radio("相关类型", ["Pearson（线性相关）", "Spearman（秩相关）"], horizontal=True)
+        corr_mat = corr_spearman_sub if "Spearman" in corr_method else corr_pearson_sub
+
+        fig_heat = go.Figure(data=go.Heatmap(
+            z=corr_mat.values,
+            x=[get_label(c) for c in corr_mat.columns],
+            y=[get_label(c) for c in corr_mat.index],
+            colorscale="RdBu_r",
+            zmid=0,
+            zmin=-1,
+            zmax=1,
+            hoverongaps=False,
+            text=[[f"{v:.2f}" for v in row] for row in corr_mat.values],
+            texttemplate="%{text}",
+            textfont={"size": 9},
+        ))
+        fig_heat.update_layout(
+            title="指标相关矩阵热力图" + (f"（已选 {len(selected_cols)} 项）" if len(selected_cols) < len(all_cols) else ""),
+            height=max(400, min(700, 200 + len(selected_cols) * 22)),
+            xaxis={"tickangle": -45, "tickfont": {"size": 10}},
+            yaxis={"tickfont": {"size": 10}},
+            margin={"b": 120},
+        )
+        st.plotly_chart(fig_heat, use_container_width=True)
+
+        # 强相关对：仅所选指标之间的配对
+        n_sub = len(selected_cols)
+        pairs = []
+        for i in range(n_sub):
+            for j in range(i + 1, n_sub):
+                a, b = corr_pearson_sub.columns[i], corr_pearson_sub.columns[j]
+                p_val = corr_pearson_sub.iloc[i, j]
+                s_val = corr_spearman_sub.iloc[i, j]
+                pairs.append((a, b, float(p_val), float(s_val)))
+        pairs_sorted = sorted(pairs, key=lambda x: abs(x[2]), reverse=True)
+
+        rate_cols = [c for c in selected_cols if "rate" in c.lower()]
+
+        st.subheader("强相关指标对")
+        min_corr = st.slider("最低 |Pearson| 显示阈值", 0.3, 0.95, 0.5, 0.05)
+        strong = [(a, b, p, s) for a, b, p, s in pairs_sorted if abs(p) >= min_corr]
+
+        if not strong:
+            st.info(f"当前所选指标中，没有 |Pearson| ≥ {min_corr} 的指标对，可调低阈值或增加指标。")
+        else:
+            tbl = pd.DataFrame(
+                strong,
+                columns=["指标 A", "指标 B", "Pearson", "Spearman"],
+            )
+            tbl["指标 A"] = tbl["指标 A"].map(lambda x: get_label(x))
+            tbl["指标 B"] = tbl["指标 B"].map(lambda x: get_label(x))
+            tbl["Pearson"] = tbl["Pearson"].round(3)
+            tbl["Spearman"] = tbl["Spearman"].round(3)
+            st.dataframe(tbl, use_container_width=True, height=400)
+
+        # 仅率与率的相关（业务重点），且限于所选指标
+        rate_pairs = [(a, b, p, s) for a, b, p, s in pairs_sorted if a in rate_cols and b in rate_cols and abs(p) >= 0.4]
+        if rate_pairs:
+            st.subheader("率指标之间的相关（业务重点）")
+            tbl_rate = pd.DataFrame(
+                rate_pairs,
+                columns=["指标 A", "指标 B", "Pearson", "Spearman"],
+            )
+            tbl_rate["指标 A"] = tbl_rate["指标 A"].map(lambda x: get_label(x))
+            tbl_rate["指标 B"] = tbl_rate["指标 B"].map(lambda x: get_label(x))
+            tbl_rate["Pearson"] = tbl_rate["Pearson"].round(3)
+            tbl_rate["Spearman"] = tbl_rate["Spearman"].round(3)
+            st.dataframe(tbl_rate, use_container_width=True)
+
+if page == "📉 预测分析":
+    st.header("📉 预测分析结果")
+    st.caption("基于 tag.xlsx 的 CVR 回归与高/低转化二分类结果，及指标解读与素材方向指导。运行 python predict_analysis.py 可刷新下方内容。")
+    try:
+        with open("predict_分析结果.md", "r", encoding="utf-8") as f:
+            md_content = f.read()
+        st.markdown(md_content, unsafe_allow_html=False)
+    except FileNotFoundError:
+        st.warning("未找到 predict_分析结果.md。请先在项目目录执行：`python predict_analysis.py` 生成该文件。")
+    except Exception as e:
+        st.error(f"读取预测分析结果失败：{e}")

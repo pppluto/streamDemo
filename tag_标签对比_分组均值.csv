@@ -1,0 +1,7 @@
+﻿,Impressions,Impressions,Spend,Spend,CTA clicked,CTA clicked,CTA click rate,CTA click rate,Unique redirects rate,Unique redirects rate,HTML completion rate,HTML completion rate,Challenge solved rate,Challenge solved rate,Average duration,Average duration,Runtime error rate,Runtime error rate
+,mean,count,mean,count,mean,count,mean,count,mean,count,mean,count,mean,count,mean,count,mean,count
+_tag,,,,,,,,,,,,,,,,,,
+拖消,38738.3333,6,1035.485,6,3147.1667,6,0.1334,6,0.1199,6,0.7425,6,0.3044,6,25.4,6,0.003,6
+未标注,2860.15,20,26.9535,20,530.8,20,0.1344,20,0.1289,20,2.2039,20,0.3104,20,28.59,20,0.0042,20
+点消,15337.6667,3,362.77,3,2953.0,3,0.1809,3,0.1799,3,1.874,3,0.183,3,24.8333,3,0.0045,3
+目标物品,684671.75,4,14794.1825,4,114321.0,4,0.1078,4,0.1068,4,2.0024,4,0.4825,4,24.825,4,0.0035,4

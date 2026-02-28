@@ -7,8 +7,9 @@ streamlit>=1.28.0,<2.0
 # 数据处理
 pandas>=2.0.0
 
-# Excel 读取 (pd.read_excel(engine='openpyxl'))
+# Excel 读取：.xlsx 用 openpyxl，.xls 用 xlrd
 openpyxl>=3.1.0
+xlrd>=2.0.0
 
 # 图表可视化
 plotly>=5.18.0
